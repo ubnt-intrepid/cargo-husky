@@ -7,7 +7,7 @@ use std::{env, fmt, fs, io, path};
 
 enum Error {
     GitDirNotFound,
-    Io(io::Error),
+    Io(io::Error, PathBuf),
     OutDir(env::VarError),
     InvalidUserHooksDir(PathBuf),
     EmptyUserHook(PathBuf),
@@ -15,9 +15,12 @@ enum Error {
 
 type Result<T> = std::result::Result<T, Error>;
 
-impl From<io::Error> for Error {
-    fn from(error: io::Error) -> Error {
-        Error::Io(error)
+impl Error {
+    fn io<P>(error: io::Error, path: P) -> Error
+    where
+        P: Into<PathBuf>,
+    {
+        Error::Io(error, path.into())
     }
 }
 
@@ -34,7 +37,7 @@ impl fmt::Debug for Error {
                 ".git directory was not found in '{}' or its parent directories",
                 env::var("OUT_DIR").unwrap_or_else(|_| "".to_string()),
             ),
-            Error::Io(inner) => format!("IO error: {}", inner),
+            Error::Io(inner, path) => format!("IO error ({}): {}", path.display(), inner),
             Error::OutDir(env::VarError::NotPresent) => unreachable!(),
             Error::OutDir(env::VarError::NotUnicode(msg)) => msg.to_string_lossy().to_string(),
             Error::InvalidUserHooksDir(path) => {
@@ -50,7 +53,7 @@ fn resolve_gitdir() -> Result<PathBuf> {
     let dir = env::var("OUT_DIR")?;
     let mut dir = PathBuf::from(dir);
     if !dir.has_root() {
-        dir = fs::canonicalize(dir)?;
+        dir = fs::canonicalize(&dir).map_err(|error| Error::io(error, dir))?;
     }
     loop {
         let gitdir = dir.join(".git");
@@ -59,7 +62,10 @@ fn resolve_gitdir() -> Result<PathBuf> {
         }
         if gitdir.is_file() {
             let mut buf = String::new();
-            File::open(gitdir)?.read_to_string(&mut buf)?;
+            File::open(&gitdir)
+                .map_err(|error| Error::io(error, &gitdir))?
+                .read_to_string(&mut buf)
+                .map_err(|error| Error::io(error, gitdir))?;
             let newlines: &[_] = &['\n', '\r'];
             let gitdir = PathBuf::from(buf.trim_right_matches(newlines));
             if !gitdir.is_dir() {
@@ -101,7 +107,7 @@ fn hook_already_exists(hook: &Path) -> bool {
     }
 }
 
-fn write_script<W: io::Write>(w: &mut W) -> Result<()> {
+fn write_script<W: io::Write>(w: &mut W) -> io::Result<()> {
     macro_rules! cmd {
         ($c:expr) => {
             concat!("\necho '+", $c, "'\n", $c)
@@ -171,8 +177,9 @@ fn install_hook(hook: &str) -> Result<()> {
         p
     };
     if !hook_already_exists(&hook_path) {
-        let mut f = create_executable_file(&hook_path)?;
-        write_script(&mut f)?;
+        let mut f =
+            create_executable_file(&hook_path).map_err(|error| Error::io(error, &hook_path))?;
+        write_script(&mut f).map_err(|error| Error::io(error, &hook_path))?;
     }
     Ok(())
 }
@@ -184,8 +191,10 @@ fn install_user_hook(src: &Path, dst: &Path) -> Result<()> {
 
     let mut lines = {
         let mut vec = vec![];
-        for line in io::BufReader::new(File::open(src)?).lines() {
-            vec.push(line?);
+        let file = File::open(&src).map_err(|error| Error::io(error, &src))?;
+        for line in io::BufReader::new(file).lines() {
+            let line = line.map_err(|error| Error::io(error, &src))?;
+            vec.push(line);
         }
         vec
     };
@@ -210,9 +219,11 @@ fn install_user_hook(src: &Path, dst: &Path) -> Result<()> {
 
     let dst_file_path = dst.join(src.file_name().unwrap());
 
-    let mut f = io::BufWriter::new(create_executable_file(&dst_file_path)?);
+    let mut f = io::BufWriter::new(
+        create_executable_file(&dst_file_path).map_err(|error| Error::io(error, &dst_file_path))?,
+    );
     for line in lines {
-        writeln!(f, "{}", line)?;
+        writeln!(f, "{}", line).map_err(|error| Error::io(error, &dst_file_path))?;
     }
 
     Ok(())
@@ -259,7 +270,8 @@ fn install_user_hooks() -> Result<()> {
         return Err(Error::InvalidUserHooksDir(user_hooks_dir));
     }
 
-    let hook_paths = fs::read_dir(&user_hooks_dir)?
+    let hook_paths = fs::read_dir(&user_hooks_dir)
+        .map_err(|error| Error::io(error, &user_hooks_dir))?
         .filter_map(|e| e.ok().filter(is_executable_file).map(|e| e.path()))
         .collect::<Vec<_>>();
 
