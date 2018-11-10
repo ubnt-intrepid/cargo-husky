@@ -170,13 +170,10 @@ fn create_executable_file(path: &Path) -> io::Result<File> {
 }
 
 fn install_hook(hook: &str) -> Result<()> {
-    let hook_path = {
-        let mut p = resolve_gitdir()?;
-        p.push("hooks");
-        p.push(hook);
-        p
-    };
+    let hook_dir = resolve_gitdir()?.join("hooks");
+    let hook_path = hook_dir.join(hook);
     if !hook_already_exists(&hook_path) {
+        fs::create_dir_all(&hook_dir).map_err(|error| Error::io(error, hook_dir))?;
         let mut f =
             create_executable_file(&hook_path).map_err(|error| Error::io(error, &hook_path))?;
         write_script(&mut f).map_err(|error| Error::io(error, &hook_path))?;
@@ -280,6 +277,7 @@ fn install_user_hooks() -> Result<()> {
     }
 
     let hooks_dir = git_dir.join("hooks");
+    fs::create_dir_all(&hooks_dir).map_err(|error| Error::io(error, &hooks_dir))?;
     for path in hook_paths {
         install_user_hook(&path, &hooks_dir)?;
     }
